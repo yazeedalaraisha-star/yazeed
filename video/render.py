@@ -49,6 +49,8 @@ SCENES = [
     (13.5, 17.0, "back", "DISCIPLINE", "الانضباط"),
 ]
 OUTRO = 17.0
+TSCALE = 1.0  # scene animation speed-up for short songs
+OSCALE = 1.0  # outro animation speed-up for short songs
 
 
 # ---------------------------------------------------------------- helpers
@@ -181,7 +183,7 @@ def detect_beats(y, sr, hop=512):
 
 def sync_to_song(path):
     """Retime intro / scenes / outro so every cut lands on a beat of the song."""
-    global BEAT, BEAT0, DUR, N, SCENES, OUTRO
+    global BEAT, BEAT0, DUR, N, SCENES, OUTRO, TSCALE, OSCALE
     y, sr = load_mono(path)
     period, phase, env, efps = detect_beats(y, sr)
     BEAT, BEAT0 = float(period), float(phase)
@@ -197,14 +199,25 @@ def sync_to_song(path):
                      for i in range(len(rms))])
     m = (t_rms > 1.5) & (t_rms < 5.0)
     drop = t_rms[m][np.argmax(gain[m])] if m.any() else 2.5
-    i0 = int(np.argmin(np.abs(beats - drop)))
-    outro_len = 4.0
-    span = (DUR - outro_len) - beats[i0]
-    per = max(4, int(span / 4 / period / 2) * 2)  # beats per scene, even (leave room for outro)
     words = [s[2:] for s in SCENES]
-    starts = [float(beats[min(i0 + k * per, len(beats) - 1)]) for k in range(5)]
+    if DUR >= 18:
+        i0 = int(np.argmin(np.abs(beats - drop)))
+        outro_len = 4.0
+        span = (DUR - outro_len) - beats[i0]
+        per = max(4, int(span / 4 / period / 2) * 2)  # beats per scene, even (leave room for outro)
+        starts = [float(beats[min(i0 + k * per, len(beats) - 1)]) for k in range(5)]
+    else:
+        # short clip: land the outro on the late energy lift, fast cuts before it
+        m2 = (t_rms > DUR * 0.55) & (t_rms < DUR - 2.2)
+        lift = t_rms[m2][np.argmax(gain[m2])] if m2.any() else DUR - 2.6
+        io = int(np.argmin(np.abs(beats - lift)))
+        per = 3 if beats[io] - 12 * period >= 1.8 else 2
+        i0 = max(1, io - 4 * per)
+        starts = [float(beats[i0 + k * per]) for k in range(5)]
     SCENES = [(starts[k], starts[k + 1]) + words[k] for k in range(4)]
     OUTRO = starts[4]
+    TSCALE = max(1.0, 3.0 / (starts[1] - starts[0]))
+    OSCALE = max(1.0, 2.9 / (DUR - OUTRO))
     print(f"song: {DUR:.2f}s  tempo {60 / period:.1f} BPM  drop {drop:.2f}s  "
           f"cuts {[round(x, 2) for x in starts]}", flush=True)
 
@@ -301,7 +314,7 @@ def draw_hud(frame, t, idx):
 
 
 def draw_title(frame, word, ar, t, t0, cy):
-    lt = t - t0
+    lt = (t - t0) * TSCALE
     # English word, letter by letter drop-in
     f = font(150 if len(word) <= 6 else 118)
     total = f.getlength(word) + 6 * (len(word) - 1)
@@ -401,7 +414,7 @@ def intro(t):
 
 def scene(t, idx):
     t0, t1, key, word, ar = SCENES[idx]
-    lt = t - t0
+    lt = (t - t0) * TSCALE
     frame = Image.new("RGBA", (W, H), BLACK + (255,))
     draw_bg(frame, key, t, t0)
     draw_ghost_word(frame, word, t)
@@ -451,7 +464,7 @@ def scene(t, idx):
 
 
 def outro(t):
-    lt = t - OUTRO
+    lt = (t - OUTRO) * OSCALE
     frame = Image.new("RGBA", (W, H), BLACK + (255,))
     draw_bg(frame, "flex", t, OUTRO)
     draw_stripes(frame, t, 55)
