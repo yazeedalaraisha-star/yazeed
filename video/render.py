@@ -41,12 +41,12 @@ PANELS = {
     "back": ((1221, 446, 1671, 941), (0.50, 0.40)),
 }
 
-# start, end, panel, english word, arabic word
+# start, end, panel, title, subtitle
 SCENES = [
-    (2.5, 6.5, "flex", "STRENGTH", "القوة"),
-    (6.5, 10.0, "portrait", "FOCUS", "التركيز"),
-    (10.0, 13.5, "punch", "POWER", "الطاقة"),
-    (13.5, 17.0, "back", "DISCIPLINE", "الانضباط"),
+    (2.5, 6.5, "flex", "STRENGTH", "BUILT DIFFERENT"),
+    (6.5, 10.0, "portrait", "FOCUS", "EYES ON THE GOAL"),
+    (10.0, 13.5, "punch", "POWER", "HIT HARDER"),
+    (13.5, 17.0, "back", "DISCIPLINE", "NO DAYS OFF"),
 ]
 OUTRO = 17.0
 TSCALE = 1.0  # scene animation speed-up for short songs
@@ -185,6 +185,7 @@ def sync_to_song(path):
     """Retime intro / scenes / outro so every cut lands on a beat of the song."""
     global BEAT, BEAT0, DUR, N, SCENES, OUTRO, TSCALE, OSCALE
     y, sr = load_mono(path)
+    analyse_reactivity(y, sr)
     period, phase, env, efps = detect_beats(y, sr)
     BEAT, BEAT0 = float(period), float(phase)
     DUR = float(min(len(y) / sr, 26.0))
@@ -313,7 +314,7 @@ def draw_hud(frame, t, idx):
     paste(frame, text_img("REC", 22, WHITE + (al,)), W - 125, H - 108)
 
 
-def draw_title(frame, word, ar, t, t0, cy):
+def draw_title(frame, word, sub, t, t0, cy):
     lt = (t - t0) * TSCALE
     # English word, letter by letter drop-in
     f = font(150 if len(word) <= 6 else 118)
@@ -327,22 +328,21 @@ def draw_title(frame, word, ar, t, t0, cy):
             cx = x + f.getlength(ch) / 2
             paste(frame, im, cx, cy + dy, a=min(1, p * 2))
         x += f.getlength(ch) + 6
-    # yellow bar with Arabic word, wipes in right->left
+    # yellow bar with subtitle, wipes in left->right
     p = ease_out(prog(lt, 0.9, 1.4))
     if p > 0:
-        ar_im = text_img(ar, 84, BLACK, direction="rtl")
-        bw, bh = ar_im.width + 90, ar_im.height + 44
+        sub_im = text_img(sub, 58, BLACK)
+        bw, bh = sub_im.width + 80, sub_im.height + 44
         bar = Image.new("RGBA", (bw, bh), YELLOW + (255,))
-        bar.alpha_composite(ar_im, ((bw - ar_im.width) // 2, (bh - ar_im.height) // 2))
+        bar.alpha_composite(sub_im, ((bw - sub_im.width) // 2, (bh - sub_im.height) // 2))
         vis = int(bw * p)
-        bar = bar.crop((bw - vis, 0, bw, bh)) if vis > 0 else None
-        if bar:
-            frame.alpha_composite(bar, (int((W + bw) / 2 - vis), int(cy + 115)))
+        if vis > 0:
+            frame.alpha_composite(bar.crop((0, 0, vis, bh)), (int((W - bw) / 2), int(cy + 125)))
     # underline accent
     p2 = ease_out(prog(lt, 1.2, 1.7))
     if p2 > 0:
         d = ImageDraw.Draw(frame)
-        d.rectangle((W / 2 - 160 * p2, cy + 115 + 170, W / 2 + 160 * p2, cy + 115 + 176), fill=RED)
+        d.rectangle((W / 2 - 160 * p2, cy + 125 + 150, W / 2 + 160 * p2, cy + 125 + 156), fill=RED)
 
 
 def glitch(frame, amt):
@@ -396,8 +396,7 @@ def intro(t):
         paste(frame, im, W / 2, 820)
     p = ease_out(prog(t, 0.7, 1.1))
     if p > 0:
-        ar = text_img("يزيد", 120, YELLOW, direction="rtl")
-        paste(frame, ar, W / 2, 1010 + (1 - p) * 60, a=p)
+        paste(frame, text_img("TRAINING  DAY", 70, YELLOW), W / 2, 1010 + (1 - p) * 60, a=p)
     p = ease_out(prog(t, 1.0, 1.4))
     if p > 0:
         d.rectangle((W / 2 - 260 * p, 1110, W / 2 + 260 * p, 1170), fill=YELLOW)
@@ -413,7 +412,7 @@ def intro(t):
 
 
 def scene(t, idx):
-    t0, t1, key, word, ar = SCENES[idx]
+    t0, t1, key, word, sub = SCENES[idx]
     lt = (t - t0) * TSCALE
     frame = Image.new("RGBA", (W, H), BLACK + (255,))
     draw_bg(frame, key, t, t0)
@@ -430,7 +429,7 @@ def scene(t, idx):
     sc = 0.75 + 0.25 * ep
     # beat pulse
     beat_ph = ((t - BEAT0) % BEAT) / BEAT
-    sc *= 1 + 0.012 * math.exp(-beat_ph * 8)
+    sc *= 1 + 0.045 * math.exp(-beat_ph * 7)
     card = card.resize((int(card.width * sc), int(card.height * sc)), Image.BICUBIC)
     rot = (1 - ep) * (-6 if idx % 2 else 6) + math.sin(lt * 1.2) * 0.6
     card = card.rotate(rot, Image.BICUBIC, expand=True)
@@ -447,7 +446,7 @@ def scene(t, idx):
     title_y = 1380 if p.width > p.height else 1440
     if p.width > p.height:
         title_y = 1300
-    draw_title(frame, word, ar, t, t0, title_y)
+    draw_title(frame, word, sub, t, t0, title_y)
     draw_hud(frame, t, idx)
 
     # transitions: flash + zoom-in at start, whip zoom out at end
@@ -494,12 +493,12 @@ def outro(t):
         paste(frame, im, W / 2, 360)
     p = ease_out(prog(lt, 1.3, 1.8))
     if p > 0:
-        ar = text_img("بلا حدود", 96, BLACK, direction="rtl")
-        bw = ar.width + 100
-        bar = Image.new("RGBA", (bw, ar.height + 40), YELLOW + (255,))
-        bar.alpha_composite(ar, (50, 20))
+        tag = text_img("STAY HARD", 90, BLACK)
+        bw = tag.width + 100
+        bar = Image.new("RGBA", (bw, tag.height + 40), YELLOW + (255,))
+        bar.alpha_composite(tag, (50, 20))
         vis = max(1, int(bw * p))
-        frame.alpha_composite(bar.crop((bw - vis, 0, bw, bar.height)), (int((W + bw) / 2 - vis), 1220))
+        frame.alpha_composite(bar.crop((0, 0, vis, bar.height)), (int((W - bw) / 2), 1220))
     p = ease_out(prog(lt, 1.8, 2.3))
     if p > 0:
         paste(frame, text_img("YAZEED", 110, YELLOW), W / 2, 1480 + (1 - p) * 40, a=p)
@@ -524,7 +523,69 @@ def render(i):
     else:
         idx = next(k for k, s in enumerate(SCENES) if s[0] <= t < s[1])
         f = scene(t, idx)
-    return f.convert("RGB").tobytes()
+    return react(f.convert("RGB"), i).tobytes()
+
+
+# ---------------------------------------------------------------- audio-reactive camera
+KICK = None   # per-video-frame bass hit envelope, 0..1
+HIT = None    # per-video-frame onset (transient) envelope, 0..1
+
+
+def analyse_reactivity(y, sr):
+    """Bass energy + spectral flux per video frame, with punchy attack / smooth release."""
+    global KICK, HIT
+    hop = sr // FPS
+    n_fft = 2048
+    frames = np.lib.stride_tricks.sliding_window_view(np.pad(y, (n_fft // 2, n_fft)), n_fft)[::hop]
+    mag = np.abs(np.fft.rfft(frames * np.hanning(n_fft), axis=1))
+    low = int(150 * n_fft / sr)
+    bass = np.log1p(mag[:, 1:low].sum(1))
+    flux = np.concatenate([[0], np.maximum(0, np.diff(np.log1p(mag), axis=0)).sum(1)])
+    bass_hit = np.maximum(0, np.diff(bass, prepend=bass[0]))
+
+    def follow(x, release):
+        x = x / (np.percentile(x, 97) + 1e-9)
+        x = np.clip(x, 0, 1.2)
+        out = np.zeros_like(x)
+        k = math.exp(-1 / (release * FPS))
+        for i, v in enumerate(x):
+            out[i] = max(v, (out[i - 1] if i else 0) * k)
+        return np.clip(out, 0, 1)
+
+    KICK = follow(bass_hit, 0.12)
+    HIT = follow(flux - np.convolve(flux, np.ones(9) / 9, "same"), 0.08)
+
+
+def react(img, i):
+    if KICK is None or i >= len(KICK):
+        return img
+    k = float(KICK[i]) ** 1.5
+    h = float(HIT[i]) ** 2
+    if k < 0.03 and h < 0.05:
+        return img
+    rng = np.random.default_rng(i * 7919)
+    amp = 34 * k + 10 * h
+    dx, dy = rng.uniform(-1, 1, 2) * amp
+    rot = rng.uniform(-1, 1) * 1.6 * k
+    s = 1 + 0.07 * k + 0.02 * h
+    # zoom punch + shake + slight roll (scale up first so edges never show)
+    s += (abs(dx) + abs(dy)) / W + 0.03 * k
+    w2, h2 = int(W * s), int(H * s)
+    big = img.resize((w2, h2), Image.BILINEAR)
+    if abs(rot) > 0.05:
+        big = big.rotate(rot, Image.BILINEAR)
+    x0 = int((w2 - W) / 2 + dx)
+    y0 = int((h2 - H) / 2 + dy)
+    out = big.crop((x0, y0, x0 + W, y0 + H))
+    if h > 0.35:  # chromatic split on hard transients
+        arr = np.asarray(out).copy()
+        sh = int(14 * h)
+        arr[..., 0] = np.roll(arr[..., 0], sh, axis=1)
+        arr[..., 2] = np.roll(arr[..., 2], -sh, axis=1)
+        out = Image.fromarray(arr)
+    if k > 0.6:  # quick exposure flash on the strongest kicks
+        out = Image.blend(out, Image.new("RGB", (W, H), WHITE), 0.12 * (k - 0.6) / 0.4)
+    return out
 
 
 # ---------------------------------------------------------------- audio
