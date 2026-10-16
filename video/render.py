@@ -3,7 +3,8 @@
 The photos are only cropped, scaled and moved (Ken Burns / slides) — never
 retouched or regenerated, so facial features stay exactly as in the source.
 
-Usage: python3 render.py <collage.png> <out.mp4>
+Usage: python3 render.py <collage.png> <out.mp4> [song.mp3]
+With a song, the cuts are retimed to land on the song's detected beats.
 """
 import math
 import os
@@ -18,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 W, H, FPS = 1080, 1920, 30
 BPM = 120
 BEAT = 60 / BPM
+BEAT0 = 0.0  # time of a reference beat (beat grid phase)
 DUR = 21.0
 N = int(DUR * FPS)
 
@@ -131,9 +133,80 @@ class Assets:
 A = None
 
 
-def init(path):
+def init(path, song=None):
     global A
+    if song:
+        sync_to_song(song)
     A = Assets(path)
+
+
+# ---------------------------------------------------------------- beat sync
+def load_mono(path, sr=22050):
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", path, "-ac", "1", "-ar", str(sr),
+                          "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32), sr
+
+
+def detect_beats(y, sr, hop=512):
+    """Spectral-flux onset envelope -> tempo (autocorrelation) -> beat phase."""
+    n_fft = 2048
+    frames = np.lib.stride_tricks.sliding_window_view(np.pad(y, (n_fft // 2, n_fft)), n_fft)[::hop]
+    spec = np.log1p(np.abs(np.fft.rfft(frames * np.hanning(n_fft), axis=1)))
+    fps = sr / hop
+
+    def band_flux(sp):
+        f = np.concatenate([[0], np.maximum(0, np.diff(sp, axis=0)).sum(1)])
+        f -= np.convolve(f, np.ones(16) / 16, "same")
+        f = np.maximum(f, 0)
+        return f / (f.max() + 1e-9)
+
+    low = int(160 * n_fft / sr)  # kick / 808 band carries the beat
+    env = band_flux(spec) + 2.0 * band_flux(spec[:, :low])
+    ac = np.correlate(env, env, "full")[len(env) - 1:]
+    ac_at = lambda lag_s: np.interp(lag_s * fps, np.arange(len(ac)), ac)
+    cands = np.arange(60 / 170, 60 / 75, 0.002)
+    score = [np.mean([ac_at(k * P) for k in (1, 2, 3, 4)])
+             * np.exp(-0.5 * (np.log2(P / 0.5) / 1.0) ** 2) for P in cands]
+    period = cands[int(np.argmax(score))]
+    # phase: best comb alignment
+    best, phase = -1, 0.0
+    for ph in np.linspace(0, period, 64, endpoint=False):
+        idx = ((np.arange(ph, len(env) / fps, period)) * fps).astype(int)
+        idx = idx[idx < len(env)]
+        sc = env[idx].sum()
+        if sc > best:
+            best, phase = sc, ph
+    return period, phase, env, fps
+
+
+def sync_to_song(path):
+    """Retime intro / scenes / outro so every cut lands on a beat of the song."""
+    global BEAT, BEAT0, DUR, N, SCENES, OUTRO
+    y, sr = load_mono(path)
+    period, phase, env, efps = detect_beats(y, sr)
+    BEAT, BEAT0 = float(period), float(phase)
+    DUR = float(min(len(y) / sr, 26.0))
+    N = int(DUR * FPS)
+    beats = np.arange(phase, DUR, period)
+    # the drop = biggest jump in loudness between 1.5s and 5s, snapped to a beat
+    hop = int(sr * 0.05)
+    rms = np.sqrt(np.convolve(y ** 2, np.ones(hop) / hop, "same")[::hop])
+    t_rms = np.arange(len(rms)) * 0.05
+    win = 10
+    gain = np.array([rms[i:i + win].mean() - rms[max(0, i - win):i].mean() if i >= win else 0
+                     for i in range(len(rms))])
+    m = (t_rms > 1.5) & (t_rms < 5.0)
+    drop = t_rms[m][np.argmax(gain[m])] if m.any() else 2.5
+    i0 = int(np.argmin(np.abs(beats - drop)))
+    outro_len = 4.0
+    span = (DUR - outro_len) - beats[i0]
+    per = max(4, int(span / 4 / period / 2) * 2)  # beats per scene, even (leave room for outro)
+    words = [s[2:] for s in SCENES]
+    starts = [float(beats[min(i0 + k * per, len(beats) - 1)]) for k in range(5)]
+    SCENES = [(starts[k], starts[k + 1]) + words[k] for k in range(4)]
+    OUTRO = starts[4]
+    print(f"song: {DUR:.2f}s  tempo {60 / period:.1f} BPM  drop {drop:.2f}s  "
+          f"cuts {[round(x, 2) for x in starts]}", flush=True)
 
 
 # ---------------------------------------------------------------- layers
@@ -207,7 +280,7 @@ def framed(img, border=8, shadow=26):
 
 def draw_hud(frame, t, idx):
     d = ImageDraw.Draw(frame, "RGBA")
-    a = clamp(prog(t, 2.3, 2.9))
+    a = clamp(prog(t, SCENES[0][0] - 0.2, SCENES[0][0] + 0.4))
     if a <= 0:
         return
     al = int(255 * a)
@@ -286,6 +359,7 @@ def zoom_blur(frame, s, blur):
 
 # ---------------------------------------------------------------- scenes
 def intro(t):
+    t = t * 2.5 / SCENES[0][0]  # stretch intro to end exactly on the drop
     frame = Image.new("RGBA", (W, H), BLACK + (255,))
     d = ImageDraw.Draw(frame)
     # checker tiles pop in (echo of the gym floor)
@@ -342,7 +416,7 @@ def scene(t, idx):
     ep = ease_back(prog(lt, 0.0, 0.55), 1.4)
     sc = 0.75 + 0.25 * ep
     # beat pulse
-    beat_ph = (t % BEAT) / BEAT
+    beat_ph = ((t - BEAT0) % BEAT) / BEAT
     sc *= 1 + 0.012 * math.exp(-beat_ph * 8)
     card = card.resize((int(card.width * sc), int(card.height * sc)), Image.BICUBIC)
     rot = (1 - ep) * (-6 if idx % 2 else 6) + math.sin(lt * 1.2) * 0.6
@@ -351,7 +425,8 @@ def scene(t, idx):
     cx = W / 2 + (1 - ease_out(prog(lt, 0, 0.5))) * (W if idx % 2 else -W) * 0.6
     sx = sy = 0
     if key == "punch":  # punch impact shake
-        sh = math.exp(-max(0, lt - 1.0) * 6) if lt > 1.0 else 0
+        hit = 2 * BEAT
+        sh = math.exp(-max(0, lt - hit) * 6) if lt > hit else 0
         sx = math.sin(lt * 90) * 22 * sh
         sy = math.cos(lt * 70) * 14 * sh
     paste(frame, card, cx + sx, cy + sy, a=clamp(ep * 1.5))
@@ -501,8 +576,15 @@ def make_audio(path, sr=44100):
 
 def main():
     src, out = sys.argv[1], sys.argv[2]
-    wav = os.path.splitext(out)[0] + "_audio.wav"
-    make_audio(wav)
+    song = sys.argv[3] if len(sys.argv) > 3 else None
+    if song:
+        sync_to_song(song)
+        wav = os.path.splitext(out)[0] + "_audio.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", song, "-t", f"{DUR:.3f}",
+                        "-af", f"afade=t=out:st={DUR - 0.6:.3f}:d=0.6", wav], check=True)
+    else:
+        wav = os.path.splitext(out)[0] + "_audio.wav"
+        make_audio(wav)
     ff = subprocess.Popen([
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
@@ -510,7 +592,7 @@ def main():
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest",
         "-movflags", "+faststart", out,
     ], stdin=subprocess.PIPE)
-    with Pool(os.cpu_count(), initializer=init, initargs=(src,)) as pool:
+    with Pool(os.cpu_count(), initializer=init, initargs=(src, song)) as pool:
         for i, buf in enumerate(pool.imap(render, range(N), chunksize=4)):
             ff.stdin.write(buf)
             if i % 60 == 0:
